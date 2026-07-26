@@ -1,0 +1,389 @@
+import {
+  closeActiveDisk,
+  copyEntry,
+  createFormattedImage,
+  getDiskUsage,
+  createTextFile,
+  deleteEntry,
+  getEntryInfo,
+  getImageSnapshot,
+  listTree,
+  mountImage,
+  moveEntry,
+  readFile,
+  renameEntry,
+  restoreImage,
+  writeTextFile,
+} from '../lib/fatDisk';
+import { useAppStore, type AppState } from '../store/useAppStore';
+import type { FsEntry, OpenDocument } from '../types';
+import { detectDocumentKind, mimeForPath } from '../utils/fileKinds';
+import { basename, dirname } from '../utils/path';
+
+const floppySizes = {
+  '384k': 384 * 1024,
+  '768k': 768 * 1024,
+  '1.44M': 1440 * 1024,
+  '2.88M': 2880 * 1024,
+} as const;
+
+export type FloppySize = keyof typeof floppySizes;
+
+export const fatForgeService = {
+  selectActiveDocument,
+  selectHasImage,
+  hasImageLoaded,
+  refreshFromDisk,
+  openImageBytes,
+  openImageFile,
+  closeImage,
+  createFloppyImage,
+  createHardDiskImage,
+  openFile,
+  saveActiveFile,
+  downloadCurrentImage,
+  undoImageChange,
+  redoImageChange,
+  deletePath,
+  movePath,
+  pasteClipboardInto,
+  createTextFileInImage,
+  renamePath,
+  getInfoRows,
+  findEntry,
+  getSelectedEntry,
+  targetFolderFor,
+  cutEntry,
+  copyEntryToClipboard,
+  dispatchFind,
+  formatBytes,
+  formatHexRows,
+};
+
+function selectActiveDocument(state: AppState): OpenDocument | null {
+  return state.openDocuments.find((document) => document.id === state.activeDocumentId) ?? null;
+}
+
+function selectHasImage(state: AppState): boolean {
+  return state.imageData !== null && state.diskMeta !== null;
+}
+
+function hasImageLoaded(): boolean {
+  return selectHasImage(useAppStore.getState());
+}
+
+function refreshFromDisk(): void {
+  useAppStore.getState().updateImageSnapshot(getImageSnapshot(), getDiskUsage(), listTree());
+}
+
+async function openImageBytes(bytes: Uint8Array, name: string): Promise<void> {
+  try {
+    const meta = await mountImage(bytes, name);
+    useAppStore.getState().setImage(getImageSnapshot(), meta, getDiskUsage(), listTree());
+  } catch (error) {
+    reportError(error, 'Unable to open FAT image');
+  }
+}
+
+async function openImageFile(file: File): Promise<void> {
+  await openImageBytes(new Uint8Array(await file.arrayBuffer()), file.name);
+}
+
+function closeImage(): void {
+  closeActiveDisk();
+  useAppStore.getState().closeImage();
+}
+
+async function createFloppyImage(label: string, size: FloppySize): Promise<void> {
+  try {
+    const meta = await createFormattedImage({
+      label,
+      sizeBytes: floppySizes[size],
+      kind: 'floppy',
+      name: `Floppy ${size}`,
+    });
+    useAppStore.getState().setImage(getImageSnapshot(), meta, getDiskUsage(), listTree());
+    useAppStore.getState().setDialog(null);
+  } catch (error) {
+    reportError(error, 'Unable to create floppy image');
+  }
+}
+
+async function createHardDiskImage(label: string, sizeMb: number): Promise<void> {
+  try {
+    const clampedSize = Math.min(2048, Math.max(1, Math.floor(sizeMb)));
+    const meta = await createFormattedImage({
+      label,
+      sizeBytes: clampedSize * 1024 * 1024,
+      kind: 'hard-disk',
+      name: `Hard disk ${clampedSize} MB`,
+    });
+    useAppStore.getState().setImage(getImageSnapshot(), meta, getDiskUsage(), listTree());
+    useAppStore.getState().setDialog(null);
+  } catch (error) {
+    reportError(error, 'Unable to create hard disk image');
+  }
+}
+
+function openFile(entry: FsEntry): void {
+  if (entry.type !== 'file') {
+    return;
+  }
+  try {
+    const data = readFile(entry.path);
+    useAppStore.getState().openDocument(createOpenDocument(entry, data));
+  } catch (error) {
+    reportError(error, `Unable to open ${entry.name}`);
+  }
+}
+
+function saveActiveFile(): void {
+  const activeDocument = selectActiveDocument(useAppStore.getState());
+  if (!activeDocument || activeDocument.kind !== 'text') {
+    useAppStore.getState().setStatus('No editable text file is active');
+    return;
+  }
+
+  try {
+    writeTextFile(activeDocument.path, activeDocument.content);
+    useAppStore
+      .getState()
+      .markDocumentSaved(activeDocument.id, getImageSnapshot(), getDiskUsage(), listTree());
+    useAppStore.getState().setStatus(`${activeDocument.name} saved`);
+  } catch (error) {
+    reportError(error, `Unable to save ${activeDocument.name}`);
+  }
+}
+
+function downloadCurrentImage(): void {
+  const { diskMeta, imageData, setStatus } = useAppStore.getState();
+  if (!imageData || !diskMeta) {
+    setStatus('No image loaded');
+    return;
+  }
+
+  try {
+    const snapshot = getImageSnapshot();
+    const buffer = snapshot.buffer.slice(
+      snapshot.byteOffset,
+      snapshot.byteOffset + snapshot.byteLength,
+    ) as ArrayBuffer;
+    const blob = new Blob([buffer], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${diskMeta.label || basename(diskMeta.name) || 'fatforge'}.img`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setStatus('Image downloaded');
+  } catch (error) {
+    reportError(error, 'Unable to save image');
+  }
+}
+
+async function undoImageChange(): Promise<void> {
+  useAppStore.temporal.getState().undo();
+  await restoreDiskFromStore();
+}
+
+async function redoImageChange(): Promise<void> {
+  useAppStore.temporal.getState().redo();
+  await restoreDiskFromStore();
+}
+
+function deletePath(path: string): void {
+  try {
+    deleteEntry(path);
+    useAppStore.getState().commitFileAction({
+      imageData: getImageSnapshot(),
+      diskUsage: getDiskUsage(),
+      tree: listTree(),
+      closePath: path,
+    });
+  } catch (error) {
+    reportError(error, 'Unable to delete entry');
+  }
+}
+
+function movePath(sourcePath: string, targetFolderPath: string): void {
+  try {
+    const newPath = moveEntry(sourcePath, targetFolderPath);
+    useAppStore.getState().commitFileAction({
+      imageData: getImageSnapshot(),
+      diskUsage: getDiskUsage(),
+      tree: listTree(),
+      renamePath: { oldPath: sourcePath, newPath },
+    });
+  } catch (error) {
+    reportError(error, 'Unable to move entry');
+  }
+}
+
+function pasteClipboardInto(targetFolderPath: string): void {
+  const clipboard = useAppStore.getState().clipboard;
+  if (!clipboard) {
+    return;
+  }
+
+  try {
+    if (clipboard.mode === 'cut') {
+      const newPath = moveEntry(clipboard.path, targetFolderPath);
+      useAppStore.getState().commitFileAction({
+        imageData: getImageSnapshot(),
+        diskUsage: getDiskUsage(),
+        tree: listTree(),
+        renamePath: { oldPath: clipboard.path, newPath },
+        clearClipboard: true,
+      });
+    } else {
+      copyEntry(clipboard.path, targetFolderPath);
+      useAppStore.getState().commitFileAction({
+        imageData: getImageSnapshot(),
+        diskUsage: getDiskUsage(),
+        tree: listTree(),
+      });
+    }
+  } catch (error) {
+    reportError(error, 'Unable to paste entry');
+  }
+}
+
+function createTextFileInImage(parentPath: string, name: string): string | null {
+  try {
+    const path = createTextFile(parentPath, name);
+    useAppStore.getState().commitFileAction({
+      imageData: getImageSnapshot(),
+      diskUsage: getDiskUsage(),
+      tree: listTree(),
+      selectedPath: path,
+    });
+    return path;
+  } catch (error) {
+    reportError(error, 'Unable to create file');
+    return null;
+  }
+}
+
+function renamePath(path: string, newName: string): string | null {
+  try {
+    const newPath = renameEntry(path, newName);
+    useAppStore.getState().commitFileAction({
+      imageData: getImageSnapshot(),
+      diskUsage: getDiskUsage(),
+      tree: listTree(),
+      selectedPath: newPath,
+      renamePath: { oldPath: path, newPath },
+    });
+    return newPath;
+  } catch (error) {
+    reportError(error, 'Unable to rename entry');
+    return null;
+  }
+}
+
+function getInfoRows(path: string): Array<[string, string]> {
+  const info = getEntryInfo(path);
+  return [
+    ['Path', info.path],
+    ['Type', info.type],
+    ['Size', `${info.size.toLocaleString()} bytes`],
+    ['Modified', new Date(info.modified).toLocaleString()],
+    ['Attributes', `0x${info.attrib.toString(16).padStart(2, '0')}`],
+  ];
+}
+
+function findEntry(entries: FsEntry[], path: string): FsEntry | null {
+  for (const entry of entries) {
+    if (entry.path === path) {
+      return entry;
+    }
+    const nested = findEntry(entry.children ?? [], path);
+    if (nested) {
+      return nested;
+    }
+  }
+  return null;
+}
+
+function getSelectedEntry(): FsEntry | null {
+  const { selectedPath, tree } = useAppStore.getState();
+  return selectedPath ? findEntry(tree, selectedPath) : null;
+}
+
+function targetFolderFor(entry: FsEntry | null): string {
+  if (!entry) {
+    return '';
+  }
+  return entry.type === 'folder' ? entry.path : dirname(entry.path);
+}
+
+function cutEntry(entry: FsEntry): void {
+  useAppStore.getState().setClipboard({
+    mode: 'cut',
+    path: entry.path,
+    entryType: entry.type,
+  });
+}
+
+function copyEntryToClipboard(entry: FsEntry): void {
+  useAppStore.getState().setClipboard({
+    mode: 'copy',
+    path: entry.path,
+    entryType: entry.type,
+  });
+}
+
+function dispatchFind(): void {
+  window.dispatchEvent(new CustomEvent('fatforge:find'));
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / 1024 / 1024).toFixed(bytes % (1024 * 1024) === 0 ? 0 : 1)} MB`;
+  }
+  return `${Math.round(bytes / 1024)} KB`;
+}
+
+function formatHexRows(data: Uint8Array): string[] {
+  const output: string[] = [];
+  for (let offset = 0; offset < data.length; offset += 16) {
+    const slice = data.slice(offset, offset + 16);
+    const hex = Array.from(slice)
+      .map((byte) => byte.toString(16).padStart(2, '0').toUpperCase())
+      .join(' ');
+    const ascii = Array.from(slice)
+      .map((byte) => (byte >= 32 && byte <= 126 ? String.fromCharCode(byte) : '.'))
+      .join('');
+    output.push(`${offset.toString(16).padStart(8, '0').toUpperCase()}  ${hex.padEnd(47)}  ${ascii}`);
+  }
+  return output;
+}
+
+function createOpenDocument(entry: FsEntry, data: Uint8Array): OpenDocument {
+  const kind = detectDocumentKind(entry.path, data);
+  const content = kind === 'text' ? new TextDecoder().decode(data) : '';
+  return {
+    id: `doc:${entry.path}`,
+    path: entry.path,
+    name: entry.name,
+    kind,
+    data,
+    mime: mimeForPath(entry.path),
+    content,
+    savedContent: content,
+    dirty: false,
+  };
+}
+
+async function restoreDiskFromStore(): Promise<void> {
+  const snapshot = useAppStore.getState().imageData;
+  if (snapshot) {
+    await restoreImage(snapshot);
+    return;
+  }
+  closeActiveDisk();
+}
+
+function reportError(error: unknown, fallback: string): void {
+  useAppStore.getState().setStatus(error instanceof Error ? error.message : fallback);
+}

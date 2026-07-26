@@ -1,0 +1,36 @@
+{
+  "name": "fatforge",
+  "version": "1.0.0",
+  "description": "Client-side FAT12/16/32 image editor",
+  "license": "MIT",
+  "author": "parkertomatoes",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "smoke": "playwright test",
+    "test": "npm run build"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "@vitejs/plugin-react": "^6.0.4",
+    "98.css": "^0.1.21",
+    "dockview": "^7.0.4",
+    "fatfs-wasm": "^4.0.0",
+    "lucide-react": "^1.27.0",
+    "monaco-editor": "^0.56.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.5",
+    "zundo": "^2.3.0",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3"
+  }
+}
