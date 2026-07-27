@@ -1,41 +1,48 @@
 import { Copy, FilePlus2, FolderOpen, FolderPlus, Info, MinusSquare, Pencil, PlusSquare, Scissors, Trash2, Upload } from 'lucide-react';
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import fileIcon from '../../icons/file.png';
 import folderIcon from '../../icons/folder.png';
 import folderOpenIcon from '../../icons/folder-open.png';
 import { fatForgeService } from '../services/fatForgeService';
 import { useAppStore } from '../store/useAppStore';
 import type { FsEntry } from '../types';
-import { ConfirmDialog, InfoDialog, NameDialog } from './Dialogs';
+import { ConfirmDialog, InfoDialog, MessageDialog, NameDialog } from './Dialogs';
 
 interface FilePanelProps {
   width: number;
   tree: FsEntry[];
   onOpenFile: (entry: FsEntry) => void;
-  onDeletePath: (path: string) => void;
+  onDeletePaths: (paths: string[]) => void;
   onMovePath: (sourcePath: string, targetFolderPath: string) => void;
   onPasteInto: (targetFolderPath: string) => void;
   onImportFiles: (source: DataTransfer | FileList | File[], targetFolderPath: string) => void | Promise<void>;
 }
 
-type NameDialogState =
-  | { mode: 'new-file'; parentPath: string }
-  | { mode: 'new-folder'; parentPath: string }
-  | { mode: 'rename'; entry: FsEntry }
-  | null;
+type NameDialogState = { mode: 'new-folder'; parentPath: string } | null;
+
+type RenameConflictState = {
+  name: string;
+  renamedType: FsEntry['type'];
+  existingType: FsEntry['type'];
+} | null;
 
 export function FilePanel(props: FilePanelProps) {
-  const { width, tree, onOpenFile, onDeletePath, onMovePath, onPasteInto, onImportFiles } = props;
+  const { width, tree, onOpenFile, onDeletePaths, onMovePath, onPasteInto, onImportFiles } = props;
   const selectedPath = useAppStore((state) => state.selectedPath);
-  const selectedEntry = selectedPath ? fatForgeService.findEntry(tree, selectedPath) : null;
+  const selectedPaths = useAppStore((state) => state.selectedPaths);
+  const setSelectedPath = useAppStore((state) => state.setSelectedPath);
+  const setSelectedPaths = useAppStore((state) => state.setSelectedPaths);
   const setFilePanelCollapsed = useAppStore((state) => state.setFilePanelCollapsed);
   const clipboard = useAppStore((state) => state.clipboard);
   const expandedPaths = useAppStore((state) => state.expandedPaths);
   const expandAll = useAppStore((state) => state.expandAll);
   const collapseAll = useAppStore((state) => state.collapseAll);
+  const toggleExpandedPath = useAppStore((state) => state.toggleExpandedPath);
   const [menuOpen, setMenuOpen] = useState(false);
   const [nameDialog, setNameDialog] = useState<NameDialogState>(null);
-  const [deleteTarget, setDeleteTarget] = useState<FsEntry | null>(null);
+  const [renamingPath, setRenamingPath] = useState<string | null>(null);
+  const [renameConflict, setRenameConflict] = useState<RenameConflictState>(null);
+  const [deleteTarget, setDeleteTarget] = useState<FsEntry[] | null>(null);
   const [infoTarget, setInfoTarget] = useState<FsEntry | null>(null);
   const [dropTargetPath, setDropTargetPath] = useState<string | null>(null);
   const [dragSourcePath, setDragSourcePath] = useState<string | null>(null);
@@ -44,6 +51,18 @@ export function FilePanel(props: FilePanelProps) {
   const uploadFolderInputRef = useRef<HTMLInputElement>(null);
   const treeRootRef = useRef<HTMLDivElement>(null);
   const treeScrollTopRef = useRef(0);
+  const selectionAnchorPathRef = useRef<string | null>(null);
+  const effectiveSelectedPaths = selectedPaths.length > 0 ? selectedPaths : selectedPath ? [selectedPath] : [];
+  const visiblePaths = useMemo(() => collectVisiblePaths(tree, expandedPaths), [tree, expandedPaths]);
+  const selectedEntries = useMemo(
+    () =>
+      effectiveSelectedPaths
+        .map((path) => fatForgeService.findEntry(tree, path))
+        .filter((entry): entry is FsEntry => entry !== null),
+    [effectiveSelectedPaths, tree],
+  );
+  const selectedEntry = selectedPath ? fatForgeService.findEntry(tree, selectedPath) : null;
+  const hasMultipleSelection = selectedEntries.length > 1;
 
   useLayoutEffect(() => {
     const treeRoot = treeRootRef.current;
@@ -60,6 +79,20 @@ export function FilePanel(props: FilePanelProps) {
   }, [expandedPaths, tree, selectedPath]);
 
   useEffect(() => {
+    if (!selectedPath) {
+      selectionAnchorPathRef.current = null;
+      return;
+    }
+
+    if (
+      !selectionAnchorPathRef.current ||
+      !visiblePaths.includes(selectionAnchorPathRef.current)
+    ) {
+      selectionAnchorPathRef.current = selectedPath;
+    }
+  }, [selectedPath, visiblePaths]);
+
+  useEffect(() => {
     const onPointer = (event: PointerEvent) => {
       if (!menuRef.current?.contains(event.target as Node)) {
         setMenuOpen(false);
@@ -69,9 +102,27 @@ export function FilePanel(props: FilePanelProps) {
     return () => window.removeEventListener('pointerdown', onPointer);
   }, []);
 
+  useEffect(() => {
+    if (renamingPath && !fatForgeService.findEntry(tree, renamingPath)) {
+      setRenamingPath(null);
+    }
+  }, [renamingPath, tree]);
+
   const run = (action: () => void) => {
     setMenuOpen(false);
     action();
+  };
+
+  const createNewTextFile = () => {
+    const parentPath = fatForgeService.targetFolderFor(selectedEntry);
+    const path = fatForgeService.createUniqueTextFileInImage(parentPath);
+    if (!path) {
+      return;
+    }
+    if (parentPath && !expandedPaths.includes(parentPath)) {
+      toggleExpandedPath(parentPath);
+    }
+    setRenamingPath(path);
   };
 
   const importSelectedFiles = (input: HTMLInputElement) => {
@@ -80,6 +131,36 @@ export function FilePanel(props: FilePanelProps) {
       void onImportFiles(files, fatForgeService.targetFolderFor(selectedEntry));
     }
     input.value = '';
+  };
+
+  const selectTreeEntry = (
+    path: string,
+    modifiers: { metaKey?: boolean; ctrlKey?: boolean; shiftKey?: boolean },
+  ) => {
+    if (modifiers.shiftKey && selectionAnchorPathRef.current) {
+      const range = pathsBetween(visiblePaths, selectionAnchorPathRef.current, path);
+      setSelectedPaths(range.length > 0 ? range : [path], path);
+      return;
+    }
+
+    if (modifiers.metaKey || modifiers.ctrlKey) {
+      const next = effectiveSelectedPaths.includes(path)
+        ? effectiveSelectedPaths.filter((selected) => selected !== path)
+        : [...effectiveSelectedPaths, path];
+      setSelectedPaths(next, next.includes(path) ? path : next.at(-1) ?? null);
+      selectionAnchorPathRef.current = path;
+      return;
+    }
+
+    setSelectedPath(path);
+    selectionAnchorPathRef.current = path;
+  };
+
+  const requestDeleteSelected = (fallbackEntry?: FsEntry) => {
+    const targets = selectedEntries.length > 0 ? selectedEntries : fallbackEntry ? [fallbackEntry] : [];
+    if (targets.length > 0) {
+      setDeleteTarget(targets);
+    }
   };
 
   return (
@@ -135,15 +216,13 @@ export function FilePanel(props: FilePanelProps) {
               <TreeAction
                 icon={<FilePlus2 size={14} />}
                 label="New Text File"
-                onClick={() =>
-                  run(() =>
-                    setNameDialog({ mode: 'new-file', parentPath: fatForgeService.targetFolderFor(selectedEntry) }),
-                  )
-                }
+                disabled={hasMultipleSelection}
+                onClick={() => run(createNewTextFile)}
               />
               <TreeAction
                 icon={<FolderPlus size={14} />}
                 label="New Folder"
+                disabled={hasMultipleSelection}
                 onClick={() =>
                   run(() =>
                     setNameDialog({ mode: 'new-folder', parentPath: fatForgeService.targetFolderFor(selectedEntry) }),
@@ -153,43 +232,45 @@ export function FilePanel(props: FilePanelProps) {
               <TreeAction
                 icon={<Upload size={14} />}
                 label="Upload File"
+                disabled={hasMultipleSelection}
                 onClick={() => run(() => uploadFileInputRef.current?.click())}
               />
               <TreeAction
                 icon={<FolderOpen size={14} />}
                 label="Upload Folder"
+                disabled={hasMultipleSelection}
                 onClick={() => run(() => uploadFolderInputRef.current?.click())}
               />
               <div className="menu-separator" />
               <TreeAction
                 icon={<FolderOpen size={14} />}
                 label="Open"
-                disabled={!selectedEntry || selectedEntry.type !== 'file'}
+                disabled={hasMultipleSelection || !selectedEntry || selectedEntry.type !== 'file'}
                 onClick={() => run(() => selectedEntry && onOpenFile(selectedEntry))}
               />
               <TreeAction
                 icon={<Trash2 size={14} />}
                 label="Delete"
-                disabled={!selectedEntry}
-                onClick={() => run(() => selectedEntry && setDeleteTarget(selectedEntry))}
+                disabled={selectedEntries.length === 0}
+                onClick={() => run(() => requestDeleteSelected())}
               />
               <TreeAction
                 icon={<Pencil size={14} />}
                 label="Rename"
-                disabled={!selectedEntry}
-                onClick={() => run(() => selectedEntry && setNameDialog({ mode: 'rename', entry: selectedEntry }))}
+                disabled={hasMultipleSelection || !selectedEntry}
+                onClick={() => run(() => selectedEntry && setRenamingPath(selectedEntry.path))}
               />
               <TreeAction
                 icon={<Info size={14} />}
                 label="Get Info"
-                disabled={!selectedEntry}
+                disabled={hasMultipleSelection || !selectedEntry}
                 onClick={() => run(() => selectedEntry && setInfoTarget(selectedEntry))}
               />
               <div className="menu-separator" />
               <TreeAction
                 icon={<Scissors size={14} />}
                 label="Cut"
-                disabled={!selectedEntry}
+                disabled={hasMultipleSelection || !selectedEntry}
                 onClick={() =>
                   run(() =>
                     selectedEntry
@@ -201,7 +282,7 @@ export function FilePanel(props: FilePanelProps) {
               <TreeAction
                 icon={<Copy size={14} />}
                 label="Copy"
-                disabled={!selectedEntry}
+                disabled={hasMultipleSelection || !selectedEntry}
                 onClick={() =>
                   run(() =>
                     selectedEntry
@@ -213,12 +294,22 @@ export function FilePanel(props: FilePanelProps) {
               <TreeAction
                 icon={<FolderOpen size={14} />}
                 label="Paste"
-                disabled={!clipboard}
+                disabled={hasMultipleSelection || !clipboard}
                 onClick={() => run(() => onPasteInto(fatForgeService.targetFolderFor(selectedEntry)))}
               />
               <div className="menu-separator" />
-              <TreeAction icon={<PlusSquare size={14} />} label="Expand All" onClick={() => run(expandAll)} />
-              <TreeAction icon={<MinusSquare size={14} />} label="Collapse All" onClick={() => run(collapseAll)} />
+              <TreeAction
+                icon={<PlusSquare size={14} />}
+                label="Expand All"
+                disabled={hasMultipleSelection}
+                onClick={() => run(expandAll)}
+              />
+              <TreeAction
+                icon={<MinusSquare size={14} />}
+                label="Collapse All"
+                disabled={hasMultipleSelection}
+                onClick={() => run(collapseAll)}
+              />
             </div>
           )}
         </div>
@@ -245,6 +336,13 @@ export function FilePanel(props: FilePanelProps) {
           onScroll={(event) => {
             treeScrollTopRef.current = event.currentTarget.scrollTop;
           }}
+          onKeyDown={(event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') {
+              event.preventDefault();
+              setSelectedPaths(visiblePaths, visiblePaths.at(-1) ?? null);
+              selectionAnchorPathRef.current = visiblePaths[0] ?? null;
+            }
+          }}
         >
           {tree.length === 0 ? (
             <div className="empty-tree">No image contents</div>
@@ -256,30 +354,23 @@ export function FilePanel(props: FilePanelProps) {
                 depth={0}
                 isLast={false}
                 onOpenFile={onOpenFile}
+                onSelect={selectTreeEntry}
+                onRequestDelete={requestDeleteSelected}
                 onMovePath={onMovePath}
                 onImportFiles={onImportFiles}
                 dropTargetPath={dropTargetPath}
+                selectedPaths={effectiveSelectedPaths}
                 onDropTargetChange={setDropTargetPath}
                 dragSourcePath={dragSourcePath}
                 onDragSourceChange={setDragSourcePath}
+                renamingPath={renamingPath}
+                onRenamingPathChange={setRenamingPath}
+                onRenameConflict={setRenameConflict}
               />
             ))
           )}
         </div>
       </div>
-      {nameDialog?.mode === 'new-file' && (
-        <NameDialog
-          title="New Text File"
-          label="File name"
-          initialValue="NEWFILE.TXT"
-          onCancel={() => setNameDialog(null)}
-          onSubmit={(value) => {
-            if (fatForgeService.createTextFileInImage(nameDialog.parentPath, value)) {
-              setNameDialog(null);
-            }
-          }}
-        />
-      )}
       {nameDialog?.mode === 'new-folder' && (
         <NameDialog
           title="New Folder"
@@ -293,28 +384,26 @@ export function FilePanel(props: FilePanelProps) {
           }}
         />
       )}
-      {nameDialog?.mode === 'rename' && (
-        <NameDialog
-          title="Rename"
-          label="New name"
-          initialValue={nameDialog.entry.name}
-          onCancel={() => setNameDialog(null)}
-          onSubmit={(value) => {
-            if (fatForgeService.renamePath(nameDialog.entry.path, value)) {
-              setNameDialog(null);
-            }
-          }}
-        />
-      )}
       {deleteTarget && (
         <ConfirmDialog
           title="Delete"
-          message={`Delete ${deleteTarget.name}?`}
+          message={
+            deleteTarget.length === 1
+              ? `Delete ${deleteTarget[0].name}?`
+              : `Delete ${deleteTarget.length} selected items?`
+          }
           onCancel={() => setDeleteTarget(null)}
           onConfirm={() => {
-            onDeletePath(deleteTarget.path);
+            onDeletePaths(deleteTarget.map((entry) => entry.path));
             setDeleteTarget(null);
           }}
+        />
+      )}
+      {renameConflict && (
+        <MessageDialog
+          title="Rename"
+          message={`Cannot rename ${renameConflict.name}. A ${renameConflict.existingType} with the name you specified already exists. Please specify a different ${renameConflict.renamedType}.`}
+          onClose={() => setRenameConflict(null)}
         />
       )}
       {infoTarget && (
@@ -333,30 +422,42 @@ function TreeNode({
   depth,
   isLast,
   onOpenFile,
+  onSelect,
+  onRequestDelete,
   onMovePath,
   onImportFiles,
   dropTargetPath,
+  selectedPaths,
   onDropTargetChange,
   dragSourcePath,
   onDragSourceChange,
+  renamingPath,
+  onRenamingPathChange,
+  onRenameConflict,
 }: {
   entry: FsEntry;
   depth: number;
   isLast: boolean;
   onOpenFile: (entry: FsEntry) => void;
+  onSelect: (path: string, modifiers: { metaKey?: boolean; ctrlKey?: boolean; shiftKey?: boolean }) => void;
+  onRequestDelete: (fallbackEntry?: FsEntry) => void;
   onMovePath: (sourcePath: string, targetFolderPath: string) => void;
   onImportFiles: (source: DataTransfer | FileList | File[], targetFolderPath: string) => void | Promise<void>;
   dropTargetPath: string | null;
+  selectedPaths: string[];
   onDropTargetChange: (path: string | null) => void;
   dragSourcePath: string | null;
   onDragSourceChange: (path: string | null) => void;
+  renamingPath: string | null;
+  onRenamingPathChange: (path: string | null) => void;
+  onRenameConflict: (conflict: NonNullable<RenameConflictState>) => void;
 }) {
-  const selectedPath = useAppStore((state) => state.selectedPath);
   const expandedPaths = useAppStore((state) => state.expandedPaths);
-  const setSelectedPath = useAppStore((state) => state.setSelectedPath);
   const toggleExpandedPath = useAppStore((state) => state.toggleExpandedPath);
   const isExpanded = expandedPaths.includes(entry.path);
   const isFolder = entry.type === 'folder';
+  const isSelected = selectedPaths.includes(entry.path);
+  const isRenaming = renamingPath === entry.path;
   const icon = isFolder ? (isExpanded ? folderOpenIcon : folderIcon) : fileIcon;
   const itemStyle =
     depth > 0
@@ -365,7 +466,7 @@ function TreeNode({
   const dropFolderPath = isFolder ? entry.path : fatForgeService.targetFolderFor(entry);
 
   const dragHandlers = {
-    draggable: true,
+    draggable: !isRenaming,
     onDragStart: (event: React.DragEvent) => {
       event.dataTransfer.setData('application/x-fatforge-path', entry.path);
       event.dataTransfer.effectAllowed = 'move';
@@ -411,21 +512,29 @@ function TreeNode({
       style={itemStyle}
     >
       <div
-        className={`tree-row ${selectedPath === entry.path ? 'selected' : ''} ${
+        className={`tree-row ${isSelected ? 'selected' : ''} ${
           dropTargetPath === entry.path ? 'drop-target' : ''
         }`}
         style={{ paddingLeft: depth * 18 }}
         role="treeitem"
         tabIndex={0}
         aria-expanded={isFolder ? isExpanded : undefined}
+        aria-selected={isSelected}
         onMouseDown={(event) => {
-          if (event.button === 0) {
-            setSelectedPath(entry.path);
+          if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey) {
+            onSelect(entry.path, event);
           }
         }}
-        onClick={() => setSelectedPath(entry.path)}
+        onClick={(event) => onSelect(entry.path, event)}
         onDoubleClick={() => (isFolder ? toggleExpandedPath(entry.path) : onOpenFile(entry))}
         onKeyDown={(event) => {
+          if (event.key === 'Delete' || event.key === 'Backspace') {
+            event.preventDefault();
+            event.stopPropagation();
+            onRequestDelete(entry);
+            return;
+          }
+
           if (event.key === 'Enter') {
             if (isFolder) {
               toggleExpandedPath(entry.path);
@@ -436,7 +545,7 @@ function TreeNode({
 
           if (event.key === ' ') {
             event.preventDefault();
-            setSelectedPath(entry.path);
+            onSelect(entry.path, event);
           }
         }}
         {...dragHandlers}
@@ -453,7 +562,15 @@ function TreeNode({
           {isFolder ? (isExpanded ? '-' : '+') : ''}
         </span>
         <img src={icon} alt="" width={16} height={16} />
-        <span className="tree-name">{entry.name}</span>
+        {isRenaming ? (
+          <InlineRenameInput
+            entry={entry}
+            onConflict={onRenameConflict}
+            onDone={() => onRenamingPathChange(null)}
+          />
+        ) : (
+          <span className="tree-name">{entry.name}</span>
+        )}
       </div>
       {isFolder && isExpanded && entry.children?.map((child, index) => (
         <TreeNode
@@ -462,20 +579,140 @@ function TreeNode({
           depth={depth + 1}
           isLast={index === (entry.children?.length ?? 0) - 1}
           onOpenFile={onOpenFile}
+          onSelect={onSelect}
+          onRequestDelete={onRequestDelete}
           onMovePath={onMovePath}
           onImportFiles={onImportFiles}
           dropTargetPath={dropTargetPath}
+          selectedPaths={selectedPaths}
           onDropTargetChange={onDropTargetChange}
           dragSourcePath={dragSourcePath}
           onDragSourceChange={onDragSourceChange}
+          renamingPath={renamingPath}
+          onRenamingPathChange={onRenamingPathChange}
+          onRenameConflict={onRenameConflict}
         />
       ))}
     </div>
   );
 }
 
+function InlineRenameInput({
+  entry,
+  onConflict,
+  onDone,
+}: {
+  entry: FsEntry;
+  onConflict: (conflict: NonNullable<RenameConflictState>) => void;
+  onDone: () => void;
+}) {
+  const [value, setValue] = useState(entry.name);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const skipNextBlurCommitRef = useRef(false);
+
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) {
+      return;
+    }
+    input.focus();
+    input.select();
+  }, []);
+
+  const commit = () => {
+    const nextName = stripLineBreaks(value).trim();
+    if (!nextName || nextName === entry.name) {
+      onDone();
+      return;
+    }
+    const result = fatForgeService.renamePathWithResult(entry.path, nextName);
+    if (result.status === 'renamed') {
+      onDone();
+      return;
+    }
+    if (result.status === 'exists') {
+      skipNextBlurCommitRef.current = true;
+      setValue(entry.name);
+      onConflict({
+        name: entry.name,
+        renamedType: entry.type,
+        existingType: result.entryType,
+      });
+    }
+  };
+
+  return (
+    <input
+      ref={inputRef}
+      className="tree-rename-input"
+      aria-label={`Rename ${entry.name}`}
+      value={value}
+      onPointerDown={(event) => event.stopPropagation()}
+      onMouseDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onChange={(event) => setValue(stripLineBreaks(event.target.value))}
+      onBlur={() => {
+        if (skipNextBlurCommitRef.current) {
+          skipNextBlurCommitRef.current = false;
+          return;
+        }
+        commit();
+      }}
+      onPaste={(event) => {
+        event.preventDefault();
+        const input = event.currentTarget;
+        const pastedText = stripLineBreaks(event.clipboardData.getData('text'));
+        const selectionStart = input.selectionStart ?? value.length;
+        const selectionEnd = input.selectionEnd ?? selectionStart;
+        const nextValue = `${value.slice(0, selectionStart)}${pastedText}${value.slice(selectionEnd)}`;
+        const nextCursor = selectionStart + pastedText.length;
+        setValue(nextValue);
+        window.requestAnimationFrame(() => {
+          input.setSelectionRange(nextCursor, nextCursor);
+        });
+      }}
+      onKeyDown={(event) => {
+        event.stopPropagation();
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          commit();
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          onDone();
+        }
+      }}
+    />
+  );
+}
+
+function stripLineBreaks(value: string): string {
+  return value.replace(/[\r\n]+/g, '');
+}
+
 function canDropOnPanel(dataTransfer: DataTransfer): boolean {
   return isExternalFileDrag(dataTransfer) || dataTransfer.types.includes('application/x-fatforge-path');
+}
+
+function collectVisiblePaths(entries: FsEntry[], expandedPaths: string[]): string[] {
+  return entries.flatMap((entry) => {
+    if (entry.type === 'folder' && expandedPaths.includes(entry.path)) {
+      return [entry.path, ...collectVisiblePaths(entry.children ?? [], expandedPaths)];
+    }
+    return [entry.path];
+  });
+}
+
+function pathsBetween(paths: string[], startPath: string, endPath: string): string[] {
+  const startIndex = paths.indexOf(startPath);
+  const endIndex = paths.indexOf(endPath);
+  if (startIndex === -1 || endIndex === -1) {
+    return [];
+  }
+
+  const [from, to] = startIndex < endIndex ? [startIndex, endIndex] : [endIndex, startIndex];
+  return paths.slice(from, to + 1);
 }
 
 function canDropOnEntry(dataTransfer: DataTransfer, folderPath: string, dragSourcePath: string | null): boolean {

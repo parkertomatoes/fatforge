@@ -73,6 +73,7 @@ export function App() {
         onCloseImage={fatForgeService.closeImage}
         onSaveImage={fatForgeService.downloadCurrentImage}
         onSaveFile={fatForgeService.saveActiveFile}
+        onCloseFile={fatForgeService.closeActiveFile}
         onUndo={fatForgeService.undoImageChange}
         onRedo={fatForgeService.redoImageChange}
         onFind={fatForgeService.dispatchFind}
@@ -99,7 +100,7 @@ export function App() {
                 width={filePanelWidth}
                 tree={tree}
                 onOpenFile={fatForgeService.openFile}
-                onDeletePath={fatForgeService.deletePath}
+                onDeletePaths={fatForgeService.deletePaths}
                 onMovePath={fatForgeService.movePath}
                 onPasteInto={fatForgeService.pasteClipboardInto}
                 onImportFiles={fatForgeService.importFilesIntoImage}

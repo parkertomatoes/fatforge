@@ -7,11 +7,13 @@ export interface FileActionCommit {
   diskUsage: DiskUsage;
   tree: FsEntry[];
   selectedPath?: string | null;
+  selectedPaths?: string[];
   renamePath?: {
     oldPath: string;
     newPath: string;
   };
   closePath?: string;
+  closePaths?: string[];
   clearClipboard?: boolean;
 }
 
@@ -21,6 +23,7 @@ export interface AppState {
   imageData: Uint8Array | null;
   tree: FsEntry[];
   selectedPath: string | null;
+  selectedPaths: string[];
   expandedPaths: string[];
   clipboard: ClipboardEntry | null;
   openDocuments: OpenDocument[];
@@ -35,6 +38,7 @@ export interface AppState {
   commitFileAction: (commit: FileActionCommit) => void;
   setTree: (tree: FsEntry[]) => void;
   setSelectedPath: (path: string | null) => void;
+  setSelectedPaths: (paths: string[], primaryPath?: string | null) => void;
   toggleExpandedPath: (path: string) => void;
   expandAll: () => void;
   collapseAll: () => void;
@@ -58,6 +62,7 @@ export const useAppStore = create<AppState>()(
       imageData: null,
       tree: [],
       selectedPath: null,
+      selectedPaths: [],
       expandedPaths: [],
       clipboard: null,
       openDocuments: [],
@@ -73,6 +78,7 @@ export const useAppStore = create<AppState>()(
           diskUsage,
           tree,
           selectedPath: null,
+          selectedPaths: [],
           expandedPaths: [],
           clipboard: null,
           openDocuments: [],
@@ -86,6 +92,7 @@ export const useAppStore = create<AppState>()(
           imageData: null,
           tree: [],
           selectedPath: null,
+          selectedPaths: [],
           expandedPaths: [],
           clipboard: null,
           openDocuments: [],
@@ -109,9 +116,10 @@ export const useAppStore = create<AppState>()(
             openDocuments = renameOpenDocuments(openDocuments, commit.renamePath);
           }
 
-          if (commit.closePath) {
+          const closePaths = closePathsForCommit(commit);
+          if (closePaths.length > 0) {
             openDocuments = openDocuments.filter(
-              (document) => !isSameOrChildPath(document.path, commit.closePath!),
+              (document) => !closePaths.some((path) => isSameOrChildPath(document.path, path)),
             );
             const activeDocumentStillOpen = openDocuments.some(
               (document) => document.id === activeDocumentId,
@@ -124,6 +132,7 @@ export const useAppStore = create<AppState>()(
             diskUsage: commit.diskUsage,
             tree: commit.tree,
             selectedPath: selectedPathAfterCommit(state.selectedPath, commit),
+            selectedPaths: selectedPathsAfterCommit(state.selectedPaths, state.selectedPath, commit),
             expandedPaths: reconcileExpandedPaths(state.expandedPaths, commit.tree, commit.renamePath),
             clipboard: clipboardAfterCommit(state.clipboard, commit),
             openDocuments,
@@ -131,7 +140,18 @@ export const useAppStore = create<AppState>()(
           };
         }),
       setTree: (tree) => set({ tree }),
-      setSelectedPath: (selectedPath) => set({ selectedPath }),
+      setSelectedPath: (selectedPath) =>
+        set({
+          selectedPath,
+          selectedPaths: selectedPath ? [selectedPath] : [],
+        }),
+      setSelectedPaths: (paths, primaryPath) => {
+        const selectedPaths = uniquePaths(paths);
+        set({
+          selectedPaths,
+          selectedPath: primaryPath ?? selectedPaths.at(-1) ?? null,
+        });
+      },
       toggleExpandedPath: (path) =>
         set((state) => ({
           expandedPaths: state.expandedPaths.includes(path)
@@ -205,6 +225,7 @@ type UndoableAppState = Pick<
   | 'imageData'
   | 'tree'
   | 'selectedPath'
+  | 'selectedPaths'
   | 'expandedPaths'
   | 'clipboard'
   | 'openDocuments'
@@ -218,6 +239,7 @@ function getUndoableState(state: AppState): UndoableAppState {
     imageData: state.imageData,
     tree: state.tree,
     selectedPath: state.selectedPath,
+    selectedPaths: state.selectedPaths,
     expandedPaths: state.expandedPaths,
     clipboard: state.clipboard,
     openDocuments: state.openDocuments,
@@ -232,6 +254,7 @@ function areUndoableStatesEqual(left: UndoableAppState, right: UndoableAppState)
     left.imageData === right.imageData &&
     left.tree === right.tree &&
     left.selectedPath === right.selectedPath &&
+    left.selectedPaths === right.selectedPaths &&
     left.expandedPaths === right.expandedPaths &&
     left.clipboard === right.clipboard &&
     left.openDocuments === right.openDocuments &&
@@ -284,6 +307,26 @@ function selectedPathAfterCommit(path: string | null, commit: FileActionCommit):
   return pathAfterCommit(path, commit);
 }
 
+function selectedPathsAfterCommit(
+  paths: string[],
+  selectedPath: string | null,
+  commit: FileActionCommit,
+): string[] {
+  if (commit.selectedPaths) {
+    return uniquePaths(commit.selectedPaths);
+  }
+
+  if (Object.hasOwn(commit, 'selectedPath')) {
+    return commit.selectedPath ? [commit.selectedPath] : [];
+  }
+
+  const next = (paths.length > 0 ? paths : selectedPath ? [selectedPath] : [])
+    .map((path) => pathAfterCommit(path, commit))
+    .filter((path): path is string => path !== null);
+
+  return uniquePaths(next);
+}
+
 function clipboardAfterCommit(clipboard: ClipboardEntry | null, commit: FileActionCommit): ClipboardEntry | null {
   if (!clipboard || commit.clearClipboard) {
     return null;
@@ -297,10 +340,18 @@ function pathAfterCommit(path: string | null, commit: FileActionCommit): string 
   if (!path) {
     return path;
   }
-  if (commit.closePath && isSameOrChildPath(path, commit.closePath)) {
+  if (closePathsForCommit(commit).some((closedPath) => isSameOrChildPath(path, closedPath))) {
     return null;
   }
   return commit.renamePath ? movePathPrefix(path, commit.renamePath) : path;
+}
+
+function closePathsForCommit(commit: FileActionCommit): string[] {
+  return commit.closePaths ?? (commit.closePath ? [commit.closePath] : []);
+}
+
+function uniquePaths(paths: string[]): string[] {
+  return Array.from(new Set(paths));
 }
 
 function movePathPrefix(path: string, renamePath: NonNullable<FileActionCommit['renamePath']>): string {

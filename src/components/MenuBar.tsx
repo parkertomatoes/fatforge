@@ -12,6 +12,7 @@ interface MenuBarProps {
   onCloseImage: () => void;
   onSaveImage: () => void;
   onSaveFile: () => void;
+  onCloseFile: () => void;
   onUndo: () => void | Promise<void>;
   onRedo: () => void | Promise<void>;
   onFind: () => void;
@@ -23,10 +24,12 @@ type MenuName = 'file' | 'edit' | 'help' | null;
 export function MenuBar(props: MenuBarProps) {
   const [openMenu, setOpenMenu] = useState<MenuName>(null);
   const selectedPath = useAppStore((state) => state.selectedPath);
+  const selectedPaths = useAppStore((state) => state.selectedPaths);
   const tree = useAppStore((state) => state.tree);
   const clipboard = useAppStore((state) => state.clipboard);
   const rootRef = useRef<HTMLMenuElement>(null);
   const selectedEntry = selectedPath ? fatForgeService.findEntry(tree, selectedPath) : null;
+  const hasMultipleSelection = selectedPaths.length > 1;
 
   useEffect(() => {
     const onClick = (event: MouseEvent) => {
@@ -50,12 +53,18 @@ export function MenuBar(props: MenuBarProps) {
         <MenuItem label="New Hard Disk Image" onClick={() => menuAction(props.onNewHardDisk)} />
         <MenuSeparator />
         <MenuItem label="Open Image" onClick={() => menuAction(props.onOpenImage)} />
-        <MenuItem label="Close Image" disabled={!props.hasImage} onClick={() => menuAction(props.onCloseImage)} />
         <MenuItem label="Save Image" disabled={!props.hasImage} onClick={() => menuAction(props.onSaveImage)} />
+        <MenuItem label="Close Image" disabled={!props.hasImage} onClick={() => menuAction(props.onCloseImage)} />
+        <MenuSeparator />
         <MenuItem
           label="Save File"
           disabled={!props.activeDocument || props.activeDocument.kind !== 'text'}
           onClick={() => menuAction(props.onSaveFile)}
+        />
+        <MenuItem
+          label="Close File"
+          disabled={!props.activeDocument}
+          onClick={() => menuAction(props.onCloseFile)}
         />
       </MenuButton>
       <MenuButton label="Edit" open={openMenu === 'edit'} onClick={() => setOpenMenu(toggle(openMenu, 'edit'))}>
@@ -64,7 +73,7 @@ export function MenuBar(props: MenuBarProps) {
         <MenuSeparator />
         <MenuItem
           label="Cut"
-          disabled={!selectedEntry}
+          disabled={hasMultipleSelection || !selectedEntry}
           onClick={() =>
             menuAction(() =>
               selectedEntry
@@ -75,7 +84,7 @@ export function MenuBar(props: MenuBarProps) {
         />
         <MenuItem
           label="Copy"
-          disabled={!selectedEntry}
+          disabled={hasMultipleSelection || !selectedEntry}
           onClick={() =>
             menuAction(() =>
               selectedEntry
@@ -86,7 +95,7 @@ export function MenuBar(props: MenuBarProps) {
         />
         <MenuItem
           label="Paste"
-          disabled={!clipboard || !props.hasImage}
+          disabled={hasMultipleSelection || !clipboard || !props.hasImage}
           onClick={() =>
             menuAction(() => fatForgeService.pasteClipboardInto(fatForgeService.targetFolderFor(selectedEntry)))
           }

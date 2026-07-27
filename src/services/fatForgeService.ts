@@ -2,6 +2,7 @@ import {
   closeActiveDisk,
   copyEntry,
   createFile,
+  EntryAlreadyExistsError,
   createFolder,
   createFormattedImage,
   getDiskUsage,
@@ -20,13 +21,23 @@ import {
 import { useAppStore, type AppState } from '../store/useAppStore';
 import type { FsEntry, OpenDocument } from '../types';
 import { detectDocumentKind, mimeForPath } from '../utils/fileKinds';
-import { basename, dirname } from '../utils/path';
+import { basename, dirname, isChildPath } from '../utils/path';
 
 type ImportSource = DataTransfer | FileList | File[];
 
 type UploadEntry =
   | { type: 'file'; name: string; data: Uint8Array }
   | { type: 'folder'; name: string; children: UploadEntry[] };
+
+type CreateTextFileResult =
+  | { status: 'created'; path: string }
+  | { status: 'exists'; path: string; name: string }
+  | { status: 'error' };
+
+type RenamePathResult =
+  | { status: 'renamed'; path: string }
+  | { status: 'exists'; path: string; name: string; entryType: FsEntry['type'] }
+  | { status: 'error' };
 
 interface FileSystemEntryLike {
   name: string;
@@ -70,16 +81,20 @@ export const fatForgeService = {
   createHardDiskImage,
   openFile,
   saveActiveFile,
+  closeActiveFile,
   downloadCurrentImage,
   undoImageChange,
   redoImageChange,
   deletePath,
+  deletePaths,
   movePath,
   pasteClipboardInto,
   importFilesIntoImage,
   createFolderInImage,
   createTextFileInImage,
+  createUniqueTextFileInImage,
   renamePath,
+  renamePathWithResult,
   getInfoRows,
   findEntry,
   getSelectedEntry,
@@ -186,6 +201,16 @@ function saveActiveFile(): void {
   }
 }
 
+function closeActiveFile(): void {
+  const activeDocument = selectActiveDocument(useAppStore.getState());
+  if (!activeDocument) {
+    useAppStore.getState().setStatus('No file is active');
+    return;
+  }
+
+  useAppStore.getState().closeDocument(activeDocument.id);
+}
+
 function downloadCurrentImage(): void {
   const { diskMeta, imageData, setStatus } = useAppStore.getState();
   if (!imageData || !diskMeta) {
@@ -223,14 +248,28 @@ async function redoImageChange(): Promise<void> {
 }
 
 function deletePath(path: string): void {
+  deletePaths([path]);
+}
+
+function deletePaths(paths: string[]): void {
+  const deleteTargets = topLevelPaths(paths);
+  if (deleteTargets.length === 0) {
+    return;
+  }
+
   try {
-    deleteEntry(path);
+    deleteTargets.forEach(deleteEntry);
     useAppStore.getState().commitFileAction({
       imageData: getImageSnapshot(),
       diskUsage: getDiskUsage(),
       tree: listTree(),
-      closePath: path,
+      selectedPath: null,
+      selectedPaths: [],
+      closePaths: deleteTargets,
     });
+    useAppStore
+      .getState()
+      .setStatus(`${deleteTargets.length} item${deleteTargets.length === 1 ? '' : 's'} deleted`);
   } catch (error) {
     reportError(error, 'Unable to delete entry');
   }
@@ -438,9 +477,28 @@ function writeUploadEntry(parentPath: string, entry: UploadEntry): string[] {
   return [folderPath, ...entry.children.flatMap((child) => writeUploadEntry(folderPath, child))];
 }
 
-function createTextFileInImage(parentPath: string, name: string): string | null {
+function createTextFileInImage(parentPath: string, name: string): CreateTextFileResult {
   try {
     const path = createTextFile(parentPath, name);
+    useAppStore.getState().commitFileAction({
+      imageData: getImageSnapshot(),
+      diskUsage: getDiskUsage(),
+      tree: listTree(),
+      selectedPath: path,
+    });
+    return { status: 'created', path };
+  } catch (error) {
+    if (error instanceof EntryAlreadyExistsError) {
+      return { status: 'exists', path: error.path, name: basename(error.path) };
+    }
+    reportError(error, 'Unable to create file');
+    return { status: 'error' };
+  }
+}
+
+function createUniqueTextFileInImage(parentPath: string, suggestedName = 'NEWFILE.TXT'): string | null {
+  try {
+    const path = createFile(parentPath, suggestedName, new Uint8Array());
     useAppStore.getState().commitFileAction({
       imageData: getImageSnapshot(),
       diskUsage: getDiskUsage(),
@@ -471,6 +529,11 @@ function createFolderInImage(parentPath: string, name: string): string | null {
 }
 
 function renamePath(path: string, newName: string): string | null {
+  const result = renamePathWithResult(path, newName);
+  return result.status === 'renamed' ? result.path : null;
+}
+
+function renamePathWithResult(path: string, newName: string): RenamePathResult {
   try {
     const newPath = renameEntry(path, newName);
     useAppStore.getState().commitFileAction({
@@ -480,10 +543,19 @@ function renamePath(path: string, newName: string): string | null {
       selectedPath: newPath,
       renamePath: { oldPath: path, newPath },
     });
-    return newPath;
+    return { status: 'renamed', path: newPath };
   } catch (error) {
+    if (error instanceof EntryAlreadyExistsError) {
+      let entryType: FsEntry['type'] = 'file';
+      try {
+        entryType = getEntryInfo(error.path).type;
+      } catch {
+        entryType = 'file';
+      }
+      return { status: 'exists', path: error.path, name: basename(error.path), entryType };
+    }
     reportError(error, 'Unable to rename entry');
-    return null;
+    return { status: 'error' };
   }
 }
 
@@ -509,6 +581,13 @@ function findEntry(entries: FsEntry[], path: string): FsEntry | null {
     }
   }
   return null;
+}
+
+function topLevelPaths(paths: string[]): string[] {
+  const uniquePaths = Array.from(new Set(paths)).sort((left, right) => left.length - right.length);
+  return uniquePaths.filter(
+    (path, index) => !uniquePaths.slice(0, index).some((parentPath) => isChildPath(path, parentPath)),
+  );
 }
 
 function getSelectedEntry(): FsEntry | null {

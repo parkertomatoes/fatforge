@@ -14,6 +14,13 @@ interface CreateImageOptions {
   name: string;
 }
 
+export class EntryAlreadyExistsError extends Error {
+  constructor(public path: string) {
+    super(`Entry already exists: ${path}`);
+    this.name = 'EntryAlreadyExistsError';
+  }
+}
+
 let activeDisk: ActiveDisk | null = null;
 
 export function hasActiveDisk(): boolean {
@@ -115,6 +122,9 @@ export function createFile(parentPath: string, name: string, data: Uint8Array): 
 export function createTextFile(parentPath: string, name: string): string {
   const cleanName = sanitizeName(name);
   const path = joinFatPath(parentPath, cleanName);
+  if (entryExists(path)) {
+    throw new EntryAlreadyExistsError(path);
+  }
   writeTextFile(path, '');
   return path;
 }
@@ -140,6 +150,9 @@ export function renameEntry(oldPath: string, newName: string): string {
   const cleanOldPath = normalizeFatPath(oldPath);
   const parent = dirname(cleanOldPath);
   const newPath = joinFatPath(parent, sanitizeName(newName));
+  if (newPath !== cleanOldPath && entryExists(newPath)) {
+    throw new EntryAlreadyExistsError(newPath);
+  }
   requireDisk().disk.rename(cleanOldPath, newPath);
   return newPath;
 }

@@ -136,11 +136,15 @@ export function NameDialog({
 export function ConfirmDialog({
   title,
   message,
+  confirmLabel = 'OK',
+  cancelLabel = 'Cancel',
   onCancel,
   onConfirm,
 }: {
   title: string;
   message: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -148,8 +152,27 @@ export function ConfirmDialog({
     <Modal title={title} onClose={onCancel}>
       <p className="confirm-message">{message}</p>
       <div className="dialog-actions">
-        <button onClick={onConfirm}>OK</button>
-        <button onClick={onCancel}>Cancel</button>
+        <button onClick={onConfirm}>{confirmLabel}</button>
+        <button onClick={onCancel}>{cancelLabel}</button>
+      </div>
+    </Modal>
+  );
+}
+
+export function MessageDialog({
+  title,
+  message,
+  onClose,
+}: {
+  title: string;
+  message: string;
+  onClose: () => void;
+}) {
+  return (
+    <Modal title={title} onClose={onClose}>
+      <p className="confirm-message">{message}</p>
+      <div className="dialog-actions">
+        <button autoFocus onClick={onClose}>OK</button>
       </div>
     </Modal>
   );
