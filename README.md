@@ -1,6 +1,6 @@
 # FATForge
 
-This is a little in-browser client-side FAT image editor that is useful for updating floppy and hard disk images when using an emualtor.
+This is a little in-browser client-side FAT image editor that is useful for updating floppy and hard disk images when using PC emulators.
 
 Features
   - Create and edit FAT floppy and hard-disk images
