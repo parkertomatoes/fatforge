@@ -1,6 +1,8 @@
 import {
   closeActiveDisk,
   copyEntry,
+  createFile,
+  createFolder,
   createFormattedImage,
   getDiskUsage,
   createTextFile,
@@ -19,6 +21,33 @@ import { useAppStore, type AppState } from '../store/useAppStore';
 import type { FsEntry, OpenDocument } from '../types';
 import { detectDocumentKind, mimeForPath } from '../utils/fileKinds';
 import { basename, dirname } from '../utils/path';
+
+type ImportSource = DataTransfer | FileList | File[];
+
+type UploadEntry =
+  | { type: 'file'; name: string; data: Uint8Array }
+  | { type: 'folder'; name: string; children: UploadEntry[] };
+
+interface FileSystemEntryLike {
+  name: string;
+  isFile: boolean;
+  isDirectory: boolean;
+  file?: (success: (file: File) => void, error?: (error: DOMException) => void) => void;
+  createReader?: () => {
+    readEntries: (success: (entries: FileSystemEntryLike[]) => void, error?: (error: DOMException) => void) => void;
+  };
+}
+
+interface FileSystemHandleLike {
+  kind: 'file' | 'directory';
+  name: string;
+  getFile?: () => Promise<File>;
+  entries?: () => AsyncIterable<[string, FileSystemHandleLike]>;
+}
+
+type DataTransferItemWithHandles = DataTransferItem & {
+  getAsFileSystemHandle?: () => Promise<FileSystemHandleLike | null>;
+};
 
 const floppySizes = {
   '384k': 384 * 1024,
@@ -47,6 +76,8 @@ export const fatForgeService = {
   deletePath,
   movePath,
   pasteClipboardInto,
+  importFilesIntoImage,
+  createFolderInImage,
   createTextFileInImage,
   renamePath,
   getInfoRows,
@@ -248,6 +279,165 @@ function pasteClipboardInto(targetFolderPath: string): void {
   }
 }
 
+async function importFilesIntoImage(source: ImportSource, targetFolderPath: string): Promise<void> {
+  try {
+    const entries = await collectUploadEntries(source);
+    const imported = entries.flatMap((entry) => writeUploadEntry(targetFolderPath, entry));
+
+    if (imported.length === 0) {
+      return;
+    }
+
+    useAppStore.getState().commitFileAction({
+      imageData: getImageSnapshot(),
+      diskUsage: getDiskUsage(),
+      tree: listTree(),
+      selectedPath: imported.at(-1),
+    });
+    useAppStore
+      .getState()
+      .setStatus(`${imported.length} item${imported.length === 1 ? '' : 's'} imported`);
+  } catch (error) {
+    reportError(error, 'Unable to import file');
+  }
+}
+
+async function collectUploadEntries(source: ImportSource): Promise<UploadEntry[]> {
+  if (isDataTransferSource(source) && source.items.length > 0) {
+    const entries = (
+      await Promise.all(Array.from(source.items, (item) => uploadEntryFromDataTransferItem(item)))
+    ).filter((entry): entry is UploadEntry => entry !== null);
+    if (entries.length > 0) {
+      return entries;
+    }
+  }
+
+  const files = Array.from(isDataTransferSource(source) ? source.files : source);
+  if (files.some((file) => file.webkitRelativePath)) {
+    return uploadEntriesFromRelativeFiles(files);
+  }
+  return Promise.all(files.map((file) => uploadEntryFromFile(file.name, file)));
+}
+
+function isDataTransferSource(source: ImportSource): source is DataTransfer {
+  return typeof DataTransfer !== 'undefined' && source instanceof DataTransfer;
+}
+
+async function uploadEntryFromDataTransferItem(item: DataTransferItem): Promise<UploadEntry | null> {
+  if (item.kind !== 'file') {
+    return null;
+  }
+
+  const itemWithHandles = item as DataTransferItemWithHandles;
+  const handle = await getFileSystemHandle(itemWithHandles);
+  if (handle) {
+    return uploadEntryFromHandle(handle);
+  }
+
+  const entry = item.webkitGetAsEntry?.() as FileSystemEntryLike | null | undefined;
+  if (entry) {
+    return uploadEntryFromFileSystemEntry(entry);
+  }
+
+  const file = item.getAsFile();
+  return file ? uploadEntryFromFile(file.name, file) : null;
+}
+
+async function getFileSystemHandle(item: DataTransferItemWithHandles): Promise<FileSystemHandleLike | null> {
+  try {
+    return (await item.getAsFileSystemHandle?.()) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function uploadEntryFromHandle(handle: FileSystemHandleLike): Promise<UploadEntry> {
+  if (handle.kind === 'file') {
+    if (!handle.getFile) {
+      throw new Error(`Unable to read ${handle.name}`);
+    }
+    return uploadEntryFromFile(handle.name, await handle.getFile());
+  }
+
+  const children: UploadEntry[] = [];
+  if (handle.entries) {
+    for await (const [, child] of handle.entries()) {
+      children.push(await uploadEntryFromHandle(child));
+    }
+  }
+  return { type: 'folder', name: handle.name, children };
+}
+
+async function uploadEntryFromFileSystemEntry(entry: FileSystemEntryLike): Promise<UploadEntry> {
+  if (entry.isFile) {
+    const file = await fileFromFileSystemEntry(entry);
+    return uploadEntryFromFile(entry.name || file.name, file);
+  }
+
+  if (!entry.isDirectory || !entry.createReader) {
+    throw new Error(`Unable to read ${entry.name}`);
+  }
+
+  const reader = entry.createReader();
+  const children: UploadEntry[] = [];
+  for (;;) {
+    const batch = await readFileSystemEntries(reader);
+    if (batch.length === 0) {
+      break;
+    }
+    children.push(...await Promise.all(batch.map((child) => uploadEntryFromFileSystemEntry(child))));
+  }
+  return { type: 'folder', name: entry.name, children };
+}
+
+function fileFromFileSystemEntry(entry: FileSystemEntryLike): Promise<File> {
+  return new Promise((resolve, reject) => {
+    entry.file?.(resolve, reject) ?? reject(new Error(`Unable to read ${entry.name}`));
+  });
+}
+
+function readFileSystemEntries(
+  reader: ReturnType<NonNullable<FileSystemEntryLike['createReader']>>,
+): Promise<FileSystemEntryLike[]> {
+  return new Promise((resolve, reject) => {
+    reader.readEntries(resolve, reject);
+  });
+}
+
+async function uploadEntriesFromRelativeFiles(files: File[]): Promise<UploadEntry[]> {
+  const roots: UploadEntry[] = [];
+  for (const file of files) {
+    const parts = file.webkitRelativePath.split('/').filter(Boolean);
+    let children = roots;
+    for (const folderName of parts.slice(0, -1)) {
+      let folder = children.find((child): child is Extract<UploadEntry, { type: 'folder' }> =>
+        child.type === 'folder' && child.name === folderName,
+      );
+      if (!folder) {
+        folder = { type: 'folder', name: folderName, children: [] };
+        children.push(folder);
+      }
+      children = folder.children;
+    }
+    const fileName = parts.at(-1) ?? file.name;
+    children.push(await uploadEntryFromFile(fileName, file));
+  }
+  return roots;
+}
+
+async function uploadEntryFromFile(name: string, file: File): Promise<UploadEntry> {
+  return { type: 'file', name, data: new Uint8Array(await file.arrayBuffer()) };
+}
+
+function writeUploadEntry(parentPath: string, entry: UploadEntry): string[] {
+  if (entry.type === 'file') {
+    return [createFile(parentPath, entry.name, entry.data)];
+  }
+
+  const folderPath = createFolder(parentPath, entry.name);
+  return [folderPath, ...entry.children.flatMap((child) => writeUploadEntry(folderPath, child))];
+}
+
 function createTextFileInImage(parentPath: string, name: string): string | null {
   try {
     const path = createTextFile(parentPath, name);
@@ -260,6 +450,22 @@ function createTextFileInImage(parentPath: string, name: string): string | null 
     return path;
   } catch (error) {
     reportError(error, 'Unable to create file');
+    return null;
+  }
+}
+
+function createFolderInImage(parentPath: string, name: string): string | null {
+  try {
+    const path = createFolder(parentPath, name);
+    useAppStore.getState().commitFileAction({
+      imageData: getImageSnapshot(),
+      diskUsage: getDiskUsage(),
+      tree: listTree(),
+      selectedPath: path,
+    });
+    return path;
+  } catch (error) {
+    reportError(error, 'Unable to create folder');
     return null;
   }
 }

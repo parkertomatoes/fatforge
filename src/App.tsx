@@ -19,7 +19,7 @@ export function App() {
   const activeDocument = useAppStore(fatForgeService.selectActiveDocument);
   const hasImage = useAppStore(fatForgeService.selectHasImage);
   const setFilePanelWidth = useAppStore((state) => state.setFilePanelWidth);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const [dragActive, setDragActive] = useState(false);
   const usagePercent = diskUsage && diskUsage.totalBytes > 0
     ? Math.min(100, Math.max(0, (diskUsage.usedBytes / diskUsage.totalBytes) * 100))
@@ -31,6 +31,11 @@ export function App() {
       return;
     }
 
+    if (hasImage) {
+      setDragActive(false);
+      return;
+    }
+
     event.preventDefault();
     setDragActive(true);
   }
@@ -38,6 +43,10 @@ export function App() {
   async function handleDrop(event: React.DragEvent) {
     setDragActive(false);
     if (!isFileDrag(event)) {
+      return;
+    }
+
+    if (hasImage) {
       return;
     }
 
@@ -60,7 +69,7 @@ export function App() {
         activeDocument={activeDocument}
         onNewFloppy={() => setDialog('new-floppy')}
         onNewHardDisk={() => setDialog('new-hard-disk')}
-        onOpenImage={() => inputRef.current?.click()}
+        onOpenImage={() => imageInputRef.current?.click()}
         onCloseImage={fatForgeService.closeImage}
         onSaveImage={fatForgeService.downloadCurrentImage}
         onSaveFile={fatForgeService.saveActiveFile}
@@ -70,7 +79,7 @@ export function App() {
         onAbout={() => setDialog('about')}
       />
       <input
-        ref={inputRef}
+        ref={imageInputRef}
         className="hidden-input"
         type="file"
         accept=".img,.ima,.vfd,.dsk,.bin"
@@ -93,6 +102,7 @@ export function App() {
                 onDeletePath={fatForgeService.deletePath}
                 onMovePath={fatForgeService.movePath}
                 onPasteInto={fatForgeService.pasteClipboardInto}
+                onImportFiles={fatForgeService.importFilesIntoImage}
               />
             )}
             {!filePanelCollapsed && (

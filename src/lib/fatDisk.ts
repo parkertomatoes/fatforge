@@ -106,10 +106,22 @@ export function writeTextFile(path: string, text: string): void {
   writeFile(path, new TextEncoder().encode(text));
 }
 
+export function createFile(parentPath: string, name: string, data: Uint8Array): string {
+  const path = uniquePath(parentPath, sanitizeName(name));
+  writeFile(path, data);
+  return path;
+}
+
 export function createTextFile(parentPath: string, name: string): string {
   const cleanName = sanitizeName(name);
   const path = joinFatPath(parentPath, cleanName);
   writeTextFile(path, '');
+  return path;
+}
+
+export function createFolder(parentPath: string, name: string): string {
+  const path = uniquePath(parentPath, sanitizeName(name));
+  requireDisk().disk.mkdir(path);
   return path;
 }
 
@@ -340,6 +352,9 @@ function uniquePath(parentPath: string, name: string): string {
 }
 
 function chooseFormat(sizeBytes: number, kind: DiskKind): FatFsFormat {
+  if (kind === 'floppy') {
+    return FatFsFormat.FAT | FatFsFormat.SFD;
+  }
   if (kind === 'hard-disk' && sizeBytes >= 33 * 1024 * 1024) {
     return FatFsFormat.FAT32;
   }

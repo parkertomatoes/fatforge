@@ -1,4 +1,4 @@
-import { Copy, FilePlus2, FolderOpen, Info, MinusSquare, Pencil, PlusSquare, Scissors, Trash2 } from 'lucide-react';
+import { Copy, FilePlus2, FolderOpen, FolderPlus, Info, MinusSquare, Pencil, PlusSquare, Scissors, Trash2, Upload } from 'lucide-react';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import fileIcon from '../../icons/file.png';
 import folderIcon from '../../icons/folder.png';
@@ -15,15 +15,17 @@ interface FilePanelProps {
   onDeletePath: (path: string) => void;
   onMovePath: (sourcePath: string, targetFolderPath: string) => void;
   onPasteInto: (targetFolderPath: string) => void;
+  onImportFiles: (source: DataTransfer | FileList | File[], targetFolderPath: string) => void | Promise<void>;
 }
 
 type NameDialogState =
-  | { mode: 'new'; parentPath: string }
+  | { mode: 'new-file'; parentPath: string }
+  | { mode: 'new-folder'; parentPath: string }
   | { mode: 'rename'; entry: FsEntry }
   | null;
 
 export function FilePanel(props: FilePanelProps) {
-  const { width, tree, onOpenFile, onDeletePath, onMovePath, onPasteInto } = props;
+  const { width, tree, onOpenFile, onDeletePath, onMovePath, onPasteInto, onImportFiles } = props;
   const selectedPath = useAppStore((state) => state.selectedPath);
   const selectedEntry = selectedPath ? fatForgeService.findEntry(tree, selectedPath) : null;
   const setFilePanelCollapsed = useAppStore((state) => state.setFilePanelCollapsed);
@@ -35,7 +37,11 @@ export function FilePanel(props: FilePanelProps) {
   const [nameDialog, setNameDialog] = useState<NameDialogState>(null);
   const [deleteTarget, setDeleteTarget] = useState<FsEntry | null>(null);
   const [infoTarget, setInfoTarget] = useState<FsEntry | null>(null);
+  const [dropTargetPath, setDropTargetPath] = useState<string | null>(null);
+  const [dragSourcePath, setDragSourcePath] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const uploadFileInputRef = useRef<HTMLInputElement>(null);
+  const uploadFolderInputRef = useRef<HTMLInputElement>(null);
   const treeRootRef = useRef<HTMLDivElement>(null);
   const treeScrollTopRef = useRef(0);
 
@@ -68,6 +74,14 @@ export function FilePanel(props: FilePanelProps) {
     action();
   };
 
+  const importSelectedFiles = (input: HTMLInputElement) => {
+    const { files } = input;
+    if (files?.length) {
+      void onImportFiles(files, fatForgeService.targetFolderFor(selectedEntry));
+    }
+    input.value = '';
+  };
+
   return (
     <aside className="file-panel window" style={{ width }}>
       <div className="title-bar">
@@ -77,13 +91,33 @@ export function FilePanel(props: FilePanelProps) {
         </div>
       </div>
       <div
-        className="file-panel-body"
-        onDragOver={(event) => event.preventDefault()}
+        className={`file-panel-body ${dropTargetPath === '' ? 'drop-target' : ''}`}
+        onDragOver={(event) => {
+          if (!canDropOnPanel(event.dataTransfer)) {
+            return;
+          }
+
+          event.preventDefault();
+          if (!closestFolderRow(event.target as Element)) {
+            setDropTargetPath('');
+          }
+        }}
+        onDragLeave={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+            setDropTargetPath(null);
+          }
+        }}
         onDrop={(event) => {
           event.preventDefault();
+          event.stopPropagation();
+          setDropTargetPath(null);
           const source = event.dataTransfer.getData('application/x-fatforge-path');
           if (source) {
             onMovePath(source, '');
+            return;
+          }
+          if (isExternalFileDrag(event.dataTransfer)) {
+            void onImportFiles(event.dataTransfer, '');
           }
         }}
       >
@@ -103,10 +137,30 @@ export function FilePanel(props: FilePanelProps) {
                 label="New Text File"
                 onClick={() =>
                   run(() =>
-                    setNameDialog({ mode: 'new', parentPath: fatForgeService.targetFolderFor(selectedEntry) }),
+                    setNameDialog({ mode: 'new-file', parentPath: fatForgeService.targetFolderFor(selectedEntry) }),
                   )
                 }
               />
+              <TreeAction
+                icon={<FolderPlus size={14} />}
+                label="New Folder"
+                onClick={() =>
+                  run(() =>
+                    setNameDialog({ mode: 'new-folder', parentPath: fatForgeService.targetFolderFor(selectedEntry) }),
+                  )
+                }
+              />
+              <TreeAction
+                icon={<Upload size={14} />}
+                label="Upload File"
+                onClick={() => run(() => uploadFileInputRef.current?.click())}
+              />
+              <TreeAction
+                icon={<FolderOpen size={14} />}
+                label="Upload Folder"
+                onClick={() => run(() => uploadFolderInputRef.current?.click())}
+              />
+              <div className="menu-separator" />
               <TreeAction
                 icon={<FolderOpen size={14} />}
                 label="Open"
@@ -168,6 +222,21 @@ export function FilePanel(props: FilePanelProps) {
             </div>
           )}
         </div>
+        <input
+          ref={uploadFileInputRef}
+          className="hidden-input"
+          type="file"
+          multiple
+          onChange={(event) => importSelectedFiles(event.currentTarget)}
+        />
+        <input
+          ref={uploadFolderInputRef}
+          className="hidden-input"
+          type="file"
+          multiple
+          {...folderPickerAttributes}
+          onChange={(event) => importSelectedFiles(event.currentTarget)}
+        />
         <div
           className="tree-root"
           role="tree"
@@ -188,12 +257,17 @@ export function FilePanel(props: FilePanelProps) {
                 isLast={false}
                 onOpenFile={onOpenFile}
                 onMovePath={onMovePath}
+                onImportFiles={onImportFiles}
+                dropTargetPath={dropTargetPath}
+                onDropTargetChange={setDropTargetPath}
+                dragSourcePath={dragSourcePath}
+                onDragSourceChange={setDragSourcePath}
               />
             ))
           )}
         </div>
       </div>
-      {nameDialog?.mode === 'new' && (
+      {nameDialog?.mode === 'new-file' && (
         <NameDialog
           title="New Text File"
           label="File name"
@@ -201,6 +275,19 @@ export function FilePanel(props: FilePanelProps) {
           onCancel={() => setNameDialog(null)}
           onSubmit={(value) => {
             if (fatForgeService.createTextFileInImage(nameDialog.parentPath, value)) {
+              setNameDialog(null);
+            }
+          }}
+        />
+      )}
+      {nameDialog?.mode === 'new-folder' && (
+        <NameDialog
+          title="New Folder"
+          label="Folder name"
+          initialValue="NEWFOLDER"
+          onCancel={() => setNameDialog(null)}
+          onSubmit={(value) => {
+            if (fatForgeService.createFolderInImage(nameDialog.parentPath, value)) {
               setNameDialog(null);
             }
           }}
@@ -247,12 +334,22 @@ function TreeNode({
   isLast,
   onOpenFile,
   onMovePath,
+  onImportFiles,
+  dropTargetPath,
+  onDropTargetChange,
+  dragSourcePath,
+  onDragSourceChange,
 }: {
   entry: FsEntry;
   depth: number;
   isLast: boolean;
   onOpenFile: (entry: FsEntry) => void;
   onMovePath: (sourcePath: string, targetFolderPath: string) => void;
+  onImportFiles: (source: DataTransfer | FileList | File[], targetFolderPath: string) => void | Promise<void>;
+  dropTargetPath: string | null;
+  onDropTargetChange: (path: string | null) => void;
+  dragSourcePath: string | null;
+  onDragSourceChange: (path: string | null) => void;
 }) {
   const selectedPath = useAppStore((state) => state.selectedPath);
   const expandedPaths = useAppStore((state) => state.expandedPaths);
@@ -265,23 +362,42 @@ function TreeNode({
     depth > 0
       ? ({ '--tree-guide-x': `${depth * 18 + 5}px` } as React.CSSProperties)
       : undefined;
+  const dropFolderPath = isFolder ? entry.path : fatForgeService.targetFolderFor(entry);
 
   const dragHandlers = {
     draggable: true,
     onDragStart: (event: React.DragEvent) => {
       event.dataTransfer.setData('application/x-fatforge-path', entry.path);
       event.dataTransfer.effectAllowed = 'move';
+      onDragSourceChange(entry.path);
+    },
+    onDragEnd: () => {
+      onDragSourceChange(null);
+      onDropTargetChange(null);
     },
     onDragOver: (event: React.DragEvent) => {
-      if (isFolder) {
+      if (canDropOnEntry(event.dataTransfer, dropFolderPath, dragSourcePath)) {
         event.preventDefault();
+        event.stopPropagation();
+        onDropTargetChange(dropFolderPath);
+      }
+    },
+    onDragLeave: (event: React.DragEvent) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+        onDropTargetChange(null);
       }
     },
     onDrop: (event: React.DragEvent) => {
       event.preventDefault();
+      event.stopPropagation();
+      onDropTargetChange(null);
       const source = event.dataTransfer.getData('application/x-fatforge-path');
-      if (source && isFolder) {
-        onMovePath(source, entry.path);
+      if (source) {
+        onMovePath(source, dropFolderPath);
+        return;
+      }
+      if (isExternalFileDrag(event.dataTransfer)) {
+        void onImportFiles(event.dataTransfer, dropFolderPath);
       }
     },
   };
@@ -295,7 +411,9 @@ function TreeNode({
       style={itemStyle}
     >
       <div
-        className={`tree-row ${selectedPath === entry.path ? 'selected' : ''}`}
+        className={`tree-row ${selectedPath === entry.path ? 'selected' : ''} ${
+          dropTargetPath === entry.path ? 'drop-target' : ''
+        }`}
         style={{ paddingLeft: depth * 18 }}
         role="treeitem"
         tabIndex={0}
@@ -345,11 +463,44 @@ function TreeNode({
           isLast={index === (entry.children?.length ?? 0) - 1}
           onOpenFile={onOpenFile}
           onMovePath={onMovePath}
+          onImportFiles={onImportFiles}
+          dropTargetPath={dropTargetPath}
+          onDropTargetChange={onDropTargetChange}
+          dragSourcePath={dragSourcePath}
+          onDragSourceChange={onDragSourceChange}
         />
       ))}
     </div>
   );
 }
+
+function canDropOnPanel(dataTransfer: DataTransfer): boolean {
+  return isExternalFileDrag(dataTransfer) || dataTransfer.types.includes('application/x-fatforge-path');
+}
+
+function canDropOnEntry(dataTransfer: DataTransfer, folderPath: string, dragSourcePath: string | null): boolean {
+  if (isExternalFileDrag(dataTransfer)) {
+    return true;
+  }
+  const source = dataTransfer.getData('application/x-fatforge-path');
+  return (dragSourcePath ?? source) !== '' && (dragSourcePath ?? source) !== folderPath;
+}
+
+function closestFolderRow(target: Element | null): Element | null {
+  return target?.closest('.tree-row[aria-expanded]') ?? null;
+}
+
+function isExternalFileDrag(dataTransfer: DataTransfer): boolean {
+  return dataTransfer.types.includes('Files');
+}
+
+const folderPickerAttributes = {
+  webkitdirectory: '',
+  directory: '',
+} as React.InputHTMLAttributes<HTMLInputElement> & {
+  webkitdirectory: string;
+  directory: string;
+};
 
 function TreeAction({
   icon,
