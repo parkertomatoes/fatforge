@@ -92,6 +92,52 @@ export function AboutDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
+export function SaveImageDialog({
+  initialFileName,
+  onCancel,
+  onSave,
+}: {
+  initialFileName: string;
+  onCancel: () => void;
+  onSave: (fileName: string) => void;
+}) {
+  const [fileName, setFileName] = useState(initialFileName);
+  const trimmedFileName = fileName.trim();
+
+  const submit = () => {
+    if (trimmedFileName) {
+      onSave(trimmedFileName);
+    }
+  };
+
+  return (
+    <Modal title="Save Image As" onClose={onCancel} draggable>
+      <div className="field-row-stacked">
+        <label htmlFor="save-image-file-name">File name</label>
+        <input
+          id="save-image-file-name"
+          autoFocus
+          value={fileName}
+          onChange={(event) => setFileName(event.target.value)}
+          onFocus={(event) => event.currentTarget.select()}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              submit();
+            }
+            if (event.key === 'Escape') {
+              onCancel();
+            }
+          }}
+        />
+      </div>
+      <div className="dialog-actions">
+        <button disabled={!trimmedFileName} onClick={submit}>Save</button>
+        <button onClick={onCancel}>Cancel</button>
+      </div>
+    </Modal>
+  );
+}
+
 export function NameDialog({
   title,
   label,

@@ -37,8 +37,11 @@ export function DocumentView({ documentId }: { documentId: string }) {
             scrollBeyondLastLine: false,
             wordWrap: 'on',
           }}
-          onMount={(editor) => {
+          onMount={(editor, monaco) => {
             editorRef.current = editor;
+            editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+              fatForgeService.saveActiveFile();
+            });
           }}
           onChange={(value) => updateDocumentContent(document.id, value ?? '')}
         />

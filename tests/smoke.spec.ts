@@ -228,3 +228,63 @@ test('double-clicking an already-open file activates its existing tab', async ({
   await expect(oneTab).toHaveCount(1);
   expect(errors).toEqual([]);
 });
+
+test('save image opens a save-as dialog and downloads with the chosen name', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error' && !message.text().includes('Failed to load resource')) {
+      errors.push(message.text());
+    }
+  });
+
+  await page.goto('/');
+  await page.getByRole('menuitem', { name: 'File', exact: true }).click();
+  await page.getByText('New Floppy Image').click();
+  await page.locator('#floppy-label').fill('TESTDISK');
+  await page.getByRole('button', { name: 'OK' }).click();
+
+  await page.getByRole('menuitem', { name: 'File', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Save Image', exact: true }).click();
+  await expect(page.getByText('Save Image As')).toBeVisible();
+  await expect(page.locator('#save-image-file-name')).toHaveValue('TESTDISK.img');
+  await page.locator('#save-image-file-name').fill('CUSTOM.DSK');
+
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Save' }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe('CUSTOM.DSK');
+  await expect(page.getByText('Save Image As')).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test('keyboard shortcut saves the active text file', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error' && !message.text().includes('Failed to load resource')) {
+      errors.push(message.text());
+    }
+  });
+
+  await page.goto('/');
+  await page.getByRole('menuitem', { name: 'File', exact: true }).click();
+  await page.getByText('New Floppy Image').click();
+  await page.locator('#floppy-label').fill('TESTDISK');
+  await page.getByRole('button', { name: 'OK' }).click();
+
+  await page.getByTitle('File actions').click();
+  await page.getByText('New Text File').click();
+  await page.locator('.tree-rename-input').fill('HELLO.TXT');
+  await page.locator('.tree-rename-input').press('Enter');
+  await page.locator('.tree-name').filter({ hasText: /^HELLO\.TXT$/ }).dblclick();
+
+  await page.locator('.monaco-editor').click();
+  await page.keyboard.type('hello');
+  await expect(page.locator('.dv-tab').filter({ hasText: /HELLO\.TXT \*/ })).toHaveCount(1);
+
+  await page.keyboard.press('ControlOrMeta+S');
+  await expect(page.locator('.dv-tab').filter({ hasText: /HELLO\.TXT \*/ })).toHaveCount(0);
+  await expect(page.getByText('HELLO.TXT saved')).toBeVisible();
+  expect(errors).toEqual([]);
+});

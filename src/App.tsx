@@ -2,7 +2,7 @@ import React, { useRef, useState } from 'react';
 import { FilePanel } from './components/FilePanel';
 import { MenuBar } from './components/MenuBar';
 import { ContentDock } from './components/ContentDock';
-import { AboutDialog, NewFloppyDialog, NewHardDiskDialog } from './components/Dialogs';
+import { AboutDialog, NewFloppyDialog, NewHardDiskDialog, SaveImageDialog } from './components/Dialogs';
 import { useAppStore } from './store/useAppStore';
 import { fatForgeService } from './services/fatForgeService';
 
@@ -71,7 +71,7 @@ export function App() {
         onNewHardDisk={() => setDialog('new-hard-disk')}
         onOpenImage={() => imageInputRef.current?.click()}
         onCloseImage={fatForgeService.closeImage}
-        onSaveImage={fatForgeService.downloadCurrentImage}
+        onSaveImage={() => setDialog('save-image')}
         onSaveFile={fatForgeService.saveActiveFile}
         onCloseFile={fatForgeService.closeActiveFile}
         onUndo={fatForgeService.undoImageChange}
@@ -174,6 +174,16 @@ export function App() {
       )}
       {dialog === 'new-hard-disk' && (
         <NewHardDiskDialog onCancel={() => setDialog(null)} onCreate={fatForgeService.createHardDiskImage} />
+      )}
+      {dialog === 'save-image' && (
+        <SaveImageDialog
+          initialFileName={fatForgeService.defaultImageFileName()}
+          onCancel={() => setDialog(null)}
+          onSave={(fileName) => {
+            fatForgeService.downloadCurrentImage(fileName);
+            setDialog(null);
+          }}
+        />
       )}
       {dialog === 'about' && <AboutDialog onClose={() => setDialog(null)} />}
     </div>

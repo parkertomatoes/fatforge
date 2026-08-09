@@ -45,4 +45,4 @@ export interface ClipboardEntry {
   entryType: EntryType;
 }
 
-export type AppDialog = 'new-floppy' | 'new-hard-disk' | 'about' | null;
+export type AppDialog = 'new-floppy' | 'new-hard-disk' | 'save-image' | 'about' | null;

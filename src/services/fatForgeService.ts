@@ -82,6 +82,7 @@ export const fatForgeService = {
   openFile,
   saveActiveFile,
   closeActiveFile,
+  defaultImageFileName,
   downloadCurrentImage,
   undoImageChange,
   redoImageChange,
@@ -211,7 +212,15 @@ function closeActiveFile(): void {
   useAppStore.getState().closeDocument(activeDocument.id);
 }
 
-function downloadCurrentImage(): void {
+function defaultImageFileName(): string {
+  const { diskMeta } = useAppStore.getState();
+  if (!diskMeta) {
+    return 'fatforge.img';
+  }
+  return withImageExtension(diskMeta.label || basename(diskMeta.name) || 'fatforge');
+}
+
+function downloadCurrentImage(fileName = defaultImageFileName()): void {
   const { diskMeta, imageData, setStatus } = useAppStore.getState();
   if (!imageData || !diskMeta) {
     setStatus('No image loaded');
@@ -228,13 +237,26 @@ function downloadCurrentImage(): void {
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = `${diskMeta.label || basename(diskMeta.name) || 'fatforge'}.img`;
+    anchor.download = safeDownloadFileName(fileName);
     anchor.click();
     URL.revokeObjectURL(url);
     setStatus('Image downloaded');
   } catch (error) {
     reportError(error, 'Unable to save image');
   }
+}
+
+function withImageExtension(fileName: string): string {
+  return /\.[A-Za-z0-9]{1,8}$/.test(fileName) ? fileName : `${fileName}.img`;
+}
+
+function safeDownloadFileName(fileName: string): string {
+  const sanitized = fileName
+    .replace(/[\\/:*?"<>|\x00-\x1F]/g, '_')
+    .replace(/^\.+$/, '')
+    .trim();
+
+  return withImageExtension(sanitized || 'fatforge');
 }
 
 async function undoImageChange(): Promise<void> {
